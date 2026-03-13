@@ -1,6 +1,7 @@
+import requests
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from streamlit_geolocation import streamlit_geolocation
 from dummy_elastic import (  # swap back to `elastic` when ES is available
     search_food_items,
@@ -14,8 +15,29 @@ st.set_page_config(
     page_title="FoodResQ",
     page_icon="🥗",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
+
+# ── Reverse geocoding (Nominatim / OpenStreetMap — free, no key needed) ───────
+@st.cache_data(ttl=300)
+def get_location_name(lat: float, lon: float) -> str:
+    try:
+        r = requests.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={"lat": lat, "lon": lon, "format": "json"},
+            headers={"User-Agent": "FoodResQ/1.0"},
+            timeout=4,
+        )
+        addr = r.json().get("address", {})
+        parts = [
+            addr.get("road") or addr.get("pedestrian"),
+            addr.get("suburb") or addr.get("neighbourhood"),
+            addr.get("city") or addr.get("town") or addr.get("village"),
+        ]
+        return ", ".join(p for p in parts if p)
+    except Exception:
+        return ""
+
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -83,13 +105,18 @@ with st.spinner("Connecting to Elasticsearch..."):
         st.info("Check your `.env` file — see `README.md` for setup instructions.")
         st.stop()
 
-# ── Geolocation (one call only — library hardcodes key="loc") ─────────────────
-_geo_col, _ = st.columns([1, 5])
-with _geo_col:
+# ── Sidebar — geolocation (one call only; library hardcodes key="loc") ────────
+with st.sidebar:
+    st.markdown("### 📍 My Location")
     _loc = streamlit_geolocation()
     if isinstance(_loc, dict) and _loc.get("latitude") is not None:
         st.session_state["_geo_lat"] = float(_loc["latitude"])
         st.session_state["_geo_lon"] = float(_loc["longitude"])
+    name = get_location_name(st.session_state["_geo_lat"], st.session_state["_geo_lon"])
+    st.caption(f"**Lat** {st.session_state['_geo_lat']:.4f}  **Lon** {st.session_state['_geo_lon']:.4f}")
+    if name:
+        st.caption(f"📌 {name}")
+    st.info("Press the button to auto-fill your coordinates in Search and Add Listing.")
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tab_search, tab_add, tab_metrics = st.tabs(["🔍  Search Food", "➕  Add Listing", "📊  Impact"])
@@ -109,6 +136,10 @@ with tab_search:
         lon = st.number_input("Your longitude", value=st.session_state["_geo_lon"], format="%.4f", step=0.0001)
     with col4:
         radius_km = st.selectbox("Radius", [1, 2, 5, 10], index=1)
+
+    search_loc_name = get_location_name(lat, lon)
+    if search_loc_name:
+        st.caption(f"📌 Searching near **{search_loc_name}**")
 
     if st.button("🔍 Search", type="primary", use_container_width=True):
         with st.spinner("Searching nearby listings…"):
@@ -161,6 +192,10 @@ with tab_search:
 with tab_add:
     st.subheader("List surplus food")
 
+    add_loc_name = get_location_name(st.session_state["_geo_lat"], st.session_state["_geo_lon"])
+    if add_loc_name:
+        st.caption(f"📌 Listing location: **{add_loc_name}** — adjust coordinates below if needed.")
+
     with st.form("add_form", clear_on_submit=True):
         c1, c2 = st.columns(2)
         with c1:
@@ -183,7 +218,8 @@ with tab_add:
         elif discount_price >= price:
             st.warning("Discounted price should be less than the original price.")
         else:
-            pickup_end = (datetime.utcnow() + timedelta(hours=pickup_hours)).isoformat()
+            _now = datetime.now(timezone.utc).replace(tzinfo=None)
+            pickup_end = (_now + timedelta(hours=pickup_hours)).isoformat()
             doc = {
                 "title":          title,
                 "description":    description,
@@ -193,7 +229,7 @@ with tab_add:
                 "category":       category,
                 "location":       {"lat": lat_add, "lon": lon_add},
                 "pickup_end":     pickup_end,
-                "listed_at":      datetime.utcnow().isoformat(),
+                "listed_at":      _now.isoformat(),
             }
             with st.spinner("Indexing into Elasticsearch…"):
                 result = add_food_item(doc)
