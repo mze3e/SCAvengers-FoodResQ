@@ -1,19 +1,33 @@
+import os
 import uuid
 import requests
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 from streamlit_geolocation import streamlit_geolocation
-from elastic import (
-    search_food_items,
-    add_food_item,
-    get_metrics,
-    seed_data_if_empty,
-    reserve_item,
-    cancel_reservation,
-    get_my_reservations,
-    get_available_qty,
-)
+
+if os.getenv("ES_URL"):
+    from elastic import (
+        search_food_items,
+        add_food_item,
+        get_metrics,
+        seed_data_if_empty,
+        reserve_item,
+        cancel_reservation,
+        get_my_reservations,
+        get_available_qty,
+    )
+else:
+    from dummy_elastic import (
+        search_food_items,
+        add_food_item,
+        get_metrics,
+        seed_data_if_empty,
+        reserve_item,
+        cancel_reservation,
+        get_my_reservations,
+        get_available_qty,
+    )
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
