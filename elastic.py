@@ -5,23 +5,15 @@ Uses AWS IAM request signing via boto3 + requests-aws4auth.
 
 import os
 import boto3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from opensearchpy import OpenSearch, RequestsHttpConnection
 from requests_aws4auth import AWS4Auth
 
 INDEX = "food_items"
+RESERVATIONS_INDEX = "food_reservations"
 REGION = os.getenv("AWS_REGION", "us-west-2")
 _raw_url = os.getenv("ES_URL", "")
 HOST = _raw_url.replace("https://", "").replace("http://", "").rstrip("/")
-
-from datetime import datetime, timedelta, timezone
-from elasticsearch import Elasticsearch
-from dotenv import load_dotenv
-
-load_dotenv()
-
-INDEX = "food_items"
-RESERVATIONS_INDEX = "food_reservations"
 RESERVATION_MINUTES = 30
 
 # ── Client ────────────────────────────────────────────────────────────────────
@@ -79,7 +71,7 @@ def ensure_index(es: OpenSearch):
     es.indices.create(index=INDEX, body=mapping)
 
 
-def ensure_reservations_index(es: Elasticsearch):
+def ensure_reservations_index(es: OpenSearch):
     """Creates the food_reservations index if it doesn't exist."""
     if es.indices.exists(index=RESERVATIONS_INDEX):
         return
