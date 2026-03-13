@@ -3,7 +3,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 from streamlit_geolocation import streamlit_geolocation
-from dummy_elastic import (  # swap back to `elastic` when ES is available
+from elastic import (
     search_food_items,
     add_food_item,
     get_metrics,

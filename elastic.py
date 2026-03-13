@@ -1,42 +1,52 @@
 """
-elastic.py – All Elasticsearch interactions for FoodResQ.
+elastic.py – All OpenSearch interactions for FoodResQ.
+Uses AWS IAM request signing via boto3 + requests-aws4auth.
 """
 
 import os
+import boto3
 from datetime import datetime, timedelta
-from elasticsearch import Elasticsearch
-from dotenv import load_dotenv
-
-load_dotenv()
+from opensearchpy import OpenSearch, RequestsHttpConnection
+from requests_aws4auth import AWS4Auth
 
 INDEX = "food_items"
+REGION = os.getenv("AWS_REGION", "us-west-2")
+_raw_url = os.getenv("ES_URL", "")
+HOST = _raw_url.replace("https://", "").replace("http://", "").rstrip("/")
+
 
 # ── Client ────────────────────────────────────────────────────────────────────
 
-def get_client() -> Elasticsearch:
+def get_client() -> OpenSearch:
     """
-    Returns an authenticated Elasticsearch client.
-    Reads credentials from environment variables (see .env.example).
+    Returns an OpenSearch client authenticated via AWS IAM signing.
+    On Elastic Beanstalk the EC2 instance role supplies credentials
+    automatically via the instance metadata service — no keys needed in code.
     """
-    es_url    = os.getenv("ES_URL")           # e.g. https://xxx.es.us-east-1.aws.elastic.cloud:443
-    es_api_key = os.getenv("ES_API_KEY")      # preferred – Elastic Cloud API key
-    es_user   = os.getenv("ES_USERNAME")      # fallback basic auth
-    es_pass   = os.getenv("ES_PASSWORD")
+    if not HOST:
+        raise ValueError("ES_URL is not set. Add it to the EB environment properties.")
 
-    if not es_url:
-        raise ValueError("ES_URL is not set. Check your .env file.")
-
-    if es_api_key:
-        return Elasticsearch(es_url, api_key=es_api_key, verify_certs=True)
-    elif es_user and es_pass:
-        return Elasticsearch(es_url, basic_auth=(es_user, es_pass), verify_certs=True)
-    else:
-        raise ValueError("No Elasticsearch credentials found. Set ES_API_KEY or ES_USERNAME + ES_PASSWORD.")
+    session = boto3.Session()
+    credentials = session.get_credentials().get_frozen_credentials()
+    awsauth = AWS4Auth(
+        credentials.access_key,
+        credentials.secret_key,
+        REGION,
+        "es",
+        session_token=credentials.token,
+    )
+    return OpenSearch(
+        hosts=[{"host": HOST, "port": 443}],
+        http_auth=awsauth,
+        use_ssl=True,
+        verify_certs=True,
+        connection_class=RequestsHttpConnection,
+    )
 
 
 # ── Index setup ───────────────────────────────────────────────────────────────
 
-def ensure_index(es: Elasticsearch):
+def ensure_index(es: OpenSearch):
     """Creates the food_items index with geo_point mapping if it doesn't exist."""
     if es.indices.exists(index=INDEX):
         return
@@ -50,7 +60,7 @@ def ensure_index(es: Elasticsearch):
                 "price":          {"type": "float"},
                 "discount_price": {"type": "float"},
                 "category":       {"type": "keyword"},
-                "location":       {"type": "geo_point"},   # ← enables geo distance search
+                "location":       {"type": "geo_point"},
                 "pickup_end":     {"type": "date"},
                 "listed_at":      {"type": "date"},
             }
@@ -69,7 +79,6 @@ def search_food_items(keyword: str, lat: float, lon: float, radius_km: int = 2) 
     es = get_client()
     ensure_index(es)
 
-    # Build query
     must_clause = (
         {"multi_match": {"query": keyword, "fields": ["title^2", "description", "merchant", "category"]}}
         if keyword.strip()
@@ -87,7 +96,6 @@ def search_food_items(keyword: str, lat: float, lon: float, radius_km: int = 2) 
                             "location": {"lat": lat, "lon": lon},
                         }
                     },
-                    # Only show listings that haven't expired
                     {
                         "range": {
                             "pickup_end": {"gte": "now"}
@@ -96,7 +104,6 @@ def search_food_items(keyword: str, lat: float, lon: float, radius_km: int = 2) 
                 ],
             }
         },
-        # Sort by distance ascending
         "sort": [
             {
                 "_geo_distance": {
@@ -113,7 +120,7 @@ def search_food_items(keyword: str, lat: float, lon: float, radius_km: int = 2) 
     return response["hits"]["hits"]
 
 
-# ── Index a document ─────────────────────────────────────────────────────────
+# ── Index a document ──────────────────────────────────────────────────────────
 
 def add_food_item(doc: dict) -> bool:
     """Indexes a new food listing. Returns True on success."""
@@ -178,7 +185,7 @@ def get_metrics() -> dict:
         return {"total_items": 0, "total_saving": 0, "avg_saving": 0, "by_category": {}}
 
 
-# ── Seed data ────────────────────────────────────────────────────────────────
+# ── Seed data ─────────────────────────────────────────────────────────────────
 
 def seed_data_if_empty():
     """
@@ -190,7 +197,7 @@ def seed_data_if_empty():
 
     count = es.count(index=INDEX)["count"]
     if count > 0:
-        return  # Already has data
+        return
 
     now = datetime.utcnow()
 
