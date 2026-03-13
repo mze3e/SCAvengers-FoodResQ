@@ -1,8 +1,19 @@
 """
-elastic.py – All Elasticsearch interactions for FoodResQ.
+elastic.py – All OpenSearch interactions for FoodResQ.
+Uses AWS IAM request signing via boto3 + requests-aws4auth.
 """
 
 import os
+import boto3
+from datetime import datetime, timedelta
+from opensearchpy import OpenSearch, RequestsHttpConnection
+from requests_aws4auth import AWS4Auth
+
+INDEX = "food_items"
+REGION = os.getenv("AWS_REGION", "us-west-2")
+_raw_url = os.getenv("ES_URL", "")
+HOST = _raw_url.replace("https://", "").replace("http://", "").rstrip("/")
+
 from datetime import datetime, timedelta, timezone
 from elasticsearch import Elasticsearch
 from dotenv import load_dotenv
@@ -15,30 +26,36 @@ RESERVATION_MINUTES = 30
 
 # ── Client ────────────────────────────────────────────────────────────────────
 
-def get_client() -> Elasticsearch:
+def get_client() -> OpenSearch:
     """
-    Returns an authenticated Elasticsearch client.
-    Reads credentials from environment variables (see .env.example).
+    Returns an OpenSearch client authenticated via AWS IAM signing.
+    On Elastic Beanstalk the EC2 instance role supplies credentials
+    automatically via the instance metadata service — no keys needed in code.
     """
-    es_url    = os.getenv("ES_URL")           # e.g. https://xxx.es.us-east-1.aws.elastic.cloud:443
-    es_api_key = os.getenv("ES_API_KEY")      # preferred – Elastic Cloud API key
-    es_user   = os.getenv("ES_USERNAME")      # fallback basic auth
-    es_pass   = os.getenv("ES_PASSWORD")
+    if not HOST:
+        raise ValueError("ES_URL is not set. Add it to the EB environment properties.")
 
-    if not es_url:
-        raise ValueError("ES_URL is not set. Check your .env file.")
-
-    if es_api_key:
-        return Elasticsearch(es_url, api_key=es_api_key, verify_certs=True)
-    elif es_user and es_pass:
-        return Elasticsearch(es_url, basic_auth=(es_user, es_pass), verify_certs=True)
-    else:
-        raise ValueError("No Elasticsearch credentials found. Set ES_API_KEY or ES_USERNAME + ES_PASSWORD.")
+    session = boto3.Session()
+    credentials = session.get_credentials().get_frozen_credentials()
+    awsauth = AWS4Auth(
+        credentials.access_key,
+        credentials.secret_key,
+        REGION,
+        "es",
+        session_token=credentials.token,
+    )
+    return OpenSearch(
+        hosts=[{"host": HOST, "port": 443}],
+        http_auth=awsauth,
+        use_ssl=True,
+        verify_certs=True,
+        connection_class=RequestsHttpConnection,
+    )
 
 
 # ── Index setup ───────────────────────────────────────────────────────────────
 
-def ensure_index(es: Elasticsearch):
+def ensure_index(es: OpenSearch):
     """Creates the food_items index with geo_point mapping if it doesn't exist."""
     if es.indices.exists(index=INDEX):
         return
@@ -77,6 +94,10 @@ def ensure_reservations_index(es: Elasticsearch):
                 "item_title":     {"type": "text"},
                 "merchant":       {"type": "keyword"},
                 "discount_price": {"type": "float"},
+                "category":       {"type": "keyword"},
+                "location":       {"type": "geo_point"},
+                "pickup_end":     {"type": "date"},
+                "listed_at":      {"type": "date"},
                 "reserved_at":    {"type": "date"},
             }
         }
@@ -397,7 +418,7 @@ def seed_data_if_empty():
 
     count = es.count(index=INDEX)["count"]
     if count > 0:
-        return  # Already has data
+        return
 
     now = datetime.utcnow()
 
